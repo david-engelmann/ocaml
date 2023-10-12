@@ -206,3 +206,24 @@ jobs:
           for dir in $PARALLEL_TESTS; do \
             bash -cxe "SHOW_TIMINGS=1 tools/ci/actions/runner.sh test_prefix $dir"; \
           done
+
+  xml_test_results:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v3
+        with:
+          name: compiler
+      - name: Unpack Artifact
+        run: |
+          tar --zstd -xf sources.tar.zstd
+          rm -f sources.tar.zstd
+      - name: Run the testsuite (only result relevant)
+        run: |
+          bash -xe toosl/ci/actions/runner.sh test 2>&1 | tee test_results.log
+      - name: Upload Log
+        uses: actions/upload-artifact@v2
+        with:
+          name: test_results
+          path: test_results.log
