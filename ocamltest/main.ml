@@ -37,14 +37,38 @@ let is_test filename =
     | Tsl_parser.TSL_BEGIN_C_STYLE | TSL_BEGIN_OCAML_STYLE -> true
     | _ -> false
 *)
+module AsciiReport = struct
+  let current_filename = ref None
+  let test_filename () = Option.value ~default:"_none_" !current_filename
 
-(* this primitive announce should be used for tests
-   that were aborted on system error before ocamltest
-   could parse them *)
-let announce_test_error test_filename error =
-  Printf.printf " ... testing '%s' => unexpected error (%s)\n%!"
-    (Filename.basename test_filename) error
-
+  let emit element =
+    let open Report in
+    let do_emit () =
+      match element with
+      | Tsl_begin {prefix_dir; filename; planned} ->
+        ignore prefix_dir;
+        current_filename := Some filename;
+        Printf.printf "1..%d %s\n%!" planned filename;
+        ()
+      | Tsl_end ->
+        Printf.printf "#end %s\n%!" (test_filename () );
+        current_filename := None;
+        ()
+      | Test_begin {title} ->
+        Printf.printf " ... testing '%s' with %!" title;
+        ()
+      | Test_end {title ; result} ->
+        ignore title;
+        Printf.printf "=> %s\n%!" (Result.string_of_result result);
+        ()
+      | Error err ->
+        (* announce test_error *)
+        Printf.printf " ... testing '%s' => unexpected error (%s)\n%!" (test_filename ()) err;
+        ()
+    in
+    do_emit ()
+end
+;;
 let tsl_block_of_file test_filename =
   let input_channel = open_in test_filename in
   let lexbuf = Lexing.from_channel input_channel in
@@ -52,21 +76,21 @@ let tsl_block_of_file test_filename =
   match Tsl_parser.tsl_block Tsl_lexer.token lexbuf with
     | exception e -> close_in input_channel; raise e
     | _ as tsl_block -> close_in input_channel; tsl_block
-
-let tsl_block_of_file_safe test_filename =
+;;
+let tsl_block_of_file_safe emit test_filename =
   try tsl_block_of_file test_filename with
-  | Sys_error message ->
-    Printf.eprintf "%s\n%!" message;
-    announce_test_error test_filename message;
+  | Sys_error msg ->
+    Printf.eprintf "%s\n%!" msg;
+    emit @@ Report.error ~msg;
     exit 1
   | Parsing.Parse_error ->
     Printf.eprintf "Could not read test block in %s\n%!" test_filename;
-    announce_test_error test_filename "could not read test block";
+    emit @@ Report.error ~msg:"Could not read test block";
     exit 1
-
+;;
 let print_usage () =
   Printf.printf "%s\n%!" Options.usage
-
+;;
 type result_summary = No_failure | Some_failure | All_skipped
 let join_result summary result =
   let open Result in
@@ -83,31 +107,33 @@ let join_summaries sa sb =
   | All_skipped, All_skipped -> All_skipped
   | _ -> No_failure
 
-let rec run_test log common_prefix path behavior = function
+let rec run_test emit log path behavior = function
   Node (testenvspec, test, env_modifiers, subtrees) ->
-  Printf.printf "%s %s (%s) %!" common_prefix path test.Tests.test_name;
-  let (msg, children_behavior, result) = match behavior with
-    | Skip_all_tests -> "=> n/a", Skip_all_tests, Result.skip
+    let title = Printf.sprintf  "%s (%s) %!" path test.Tests.test_name in
+    emit @@ Report.test_begin ~title;
+    let (children_behavior, result) = match behavior with
+    | Skip_all_tests ->
+            Skip_all_tests, Result.skip
     | Run env ->
       let testenv0 = interpret_environment_statements env testenvspec in
       let testenv = List.fold_left apply_modifiers testenv0 env_modifiers in
       let (result, newenv) = Tests.run log testenv test in
-      let msg = Result.string_of_result result in
       let children_behavior =
         if Result.is_pass result then Run newenv else Skip_all_tests in
-      (msg, children_behavior, result) in
-  Printf.printf "%s\n%!" msg;
+      (children_behavior, result) in
+    emit @@ Report.test_end ~title ~result; (* Timing *)
   join_result
-    (run_test_trees log common_prefix path children_behavior subtrees) result
+    (run_test_trees emit log path children_behavior subtrees) result
 
-and run_test_trees log common_prefix path behavior trees =
+and run_test_trees emit log path behavior trees =
   List.fold_left join_summaries All_skipped
-    (List.mapi (run_test_i log common_prefix path behavior) trees)
+    (List.mapi (run_test_i emit log path behavior) trees)
 
-and run_test_i log common_prefix path behavior i test_tree =
+and run_test_i emit log path behavior i test_tree =
   let path_prefix = if path="" then "" else path ^ "." in
+  (* *)
   let new_path = Printf.sprintf "%s%d" path_prefix (i+1) in
-  run_test log common_prefix new_path behavior test_tree
+  run_test emit log new_path behavior test_tree
 
 let get_test_source_directory test_dirname =
   if (Filename.is_relative test_dirname) then
@@ -127,11 +153,11 @@ let tests_to_skip = ref []
 
 let init_tests_to_skip () =
   tests_to_skip := String.words (Sys.safe_getenv "OCAMLTEST_SKIP_TESTS")
-
-let test_file test_filename =
+;;
+let test_file emit test_filename =
   let start = if Options.show_timings then Unix.gettimeofday () else 0.0 in
   let skip_test = List.mem test_filename !tests_to_skip in
-  let tsl_block = tsl_block_of_file_safe test_filename in
+  let tsl_block = tsl_block_of_file_safe emit test_filename in
   let (rootenv_statements, test_trees) = test_trees_of_tsl_block tsl_block in
   let test_trees = match test_trees with
     | [] ->
@@ -144,6 +170,9 @@ let test_file test_filename =
   let action_names =
     let f act names = String.Set.add (Actions.name act) names in
     Actions.ActionSet.fold f used_actions String.Set.empty in
+  (* let data = (used_tests |> Tests.TestSet.to_list |> List.map (fun t -> t.Tests.test_name)) in *)
+  (* let pp_sep = Format.pp_print_space in *)
+  (* Format.printf "used_tests: %a\n" (Format.pp_print_list ~pp_sep Format.pp_print_string) data; *)
   let test_dirname = Filename.dirname test_filename in
   let test_basename = Filename.basename test_filename in
   let test_prefix = Filename.chop_extension test_basename in
@@ -154,6 +183,10 @@ let test_file test_filename =
   let hookname_prefix = Filename.concat test_source_directory test_prefix in
   let test_build_directory_prefix =
     get_test_build_directory_prefix test_directory in
+  emit @@ Report.tsl_begin
+      ~prefix_dir:test_build_directory_prefix
+      ~filename:test_filename
+      ~planned:(Tests.TestSet.cardinal used_tests);
   let clean_test_build_directory () =
     try
       Sys.rm_rf test_build_directory_prefix
@@ -177,7 +210,7 @@ let test_file test_filename =
            let hook = Actions_helpers.run_hook hook_name in
            Actions.set_hook name hook
          end in
-       String.Set.iter install_hook action_names;
+      String.Set.iter install_hook action_names;
 
        let reference_filename = Filename.concat
            test_source_directory (test_prefix ^ ".reference") in
@@ -198,12 +231,11 @@ let test_file test_filename =
        let rootenv =
          interpret_environment_statements rootenv rootenv_statements in
        let rootenv = Environments.initialize Environments.Post log rootenv in
-       let common_prefix = " ... testing '" ^ test_basename ^ "' with" in
        let initial_status =
          if skip_test then Skip_all_tests else Run rootenv
        in
        let summary =
-         run_test_trees log common_prefix "" initial_status test_trees in
+         run_test_trees emit log "" initial_status test_trees in
        Actions.clear_all_hooks();
        summary
     ) in
@@ -211,16 +243,19 @@ let test_file test_filename =
   begin match summary with
   | Some_failure ->
       if not Options.log_to_stderr then
+        (* emit Report.Diag *)
         Sys.dump_file stderr ~prefix:"> " log_filename
   | No_failure | All_skipped ->
       if not Options.keep_test_dir_on_success then
         clean_test_build_directory ()
   end;
+   emit @@ Report.tsl_end ();
+  (* TODO add timings output to reporting  *)
   if Options.show_timings && summary = No_failure then
     let wall_clock_duration = Unix.gettimeofday () -. start in
     Printf.eprintf "Wall clock: %s took %.02fs\n%!"
-                   test_filename wall_clock_duration
-
+      test_filename wall_clock_duration
+  ;;
 let is_test s =
   match tsl_block_of_file s with
   | _ -> true
@@ -277,6 +312,6 @@ let () =
   let doit f x = work_done := true; f x in
   List.iter (doit find_test_dirs) Options.find_test_dirs;
   List.iter (doit list_tests) Options.list_tests;
-  List.iter (doit test_file) Options.files_to_test;
+  List.iter (doit (test_file AsciiReport.emit)) Options.files_to_test;
   if not !work_done then print_usage();
   if !failed || not !work_done then exit 1

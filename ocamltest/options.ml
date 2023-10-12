@@ -53,7 +53,7 @@ let promote = ref false
 
 let default_timeout = ref 0
 
-let keep_test_dir_on_success = ref false
+let keep_test_dir_on_success = ref true
 
 let find_test_dirs = ref []
 
