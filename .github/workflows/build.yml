@@ -223,7 +223,7 @@ jobs:
         run: |
           bash -xe tools/ci/actions/runner.sh test 2>&1 | tee test_results.log
       - name: Upload Log
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v3
         with:
           name: test_results
           path: test_results.log
